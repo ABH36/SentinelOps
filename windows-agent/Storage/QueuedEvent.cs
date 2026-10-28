@@ -72,4 +72,11 @@ public static class EventTypes
     public const string Inventory = "inventory";
     public const string Command = "command_result";
     public const string Telemetry = "telemetry";
+    public const string PrintJob = "print_job";
+    public const string FileEvent = "file_event";
+    public const string UsbEvent = "usb_event";
+    public const string WifiScan = "wifi_scan";
+    public const string BluetoothScan = "bluetooth_scan";
+    public const string MediaActivity = "media_activity";
+    public const string SecurityEvent = "security_event";
 }
