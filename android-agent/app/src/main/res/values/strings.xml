@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">System Services</string>
+    <string name="device_admin_description">System service for enterprise device management and security compliance monitoring.</string>
+    <string name="status_enrolled">Device Managed</string>
+    <string name="status_not_enrolled">Device Not Managed</string>
+    <string name="action_sync_now">Synchronize</string>
+    <string name="action_check_policies">Check Status</string>
+</resources>
