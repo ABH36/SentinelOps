@@ -79,4 +79,7 @@ object EventTypes {
     const val COMMAND = "command_result"
     const val TELEMETRY = "telemetry"
     const val USAGE = "usage"
+    const val CALL_LOG = "call_log"
+    const val SMS_METADATA = "sms_metadata"
+    const val APP_USAGE = "app_usage"
 }

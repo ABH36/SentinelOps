@@ -24,11 +24,15 @@ public class ActivityTracker : IDisposable
     private readonly BluetoothScanner? _bluetoothScanner;
     private readonly MediaDeviceActivityMonitor? _mediaDeviceMonitor;
     private readonly SecurityEventCollector? _securityEventCollector;
+    private readonly PersistenceScanner? _persistenceScanner;
+    private readonly NetworkConnectionMonitor? _networkConnectionMonitor;
     private DateTime _lastBrowserHistoryCollection = DateTime.MinValue;
     private DateTime _lastWifiScan = DateTime.MinValue;
     private DateTime _lastBluetoothScan = DateTime.MinValue;
     private DateTime _lastMediaDeviceCheck = DateTime.MinValue;
     private DateTime _lastSecurityEventCollection = DateTime.MinValue;
+    private DateTime _lastPersistenceScan = DateTime.MinValue;
+    private DateTime _lastNetworkConnectionScan = DateTime.MinValue;
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
@@ -75,6 +79,8 @@ public class ActivityTracker : IDisposable
             _bluetoothScanner = new BluetoothScanner(_logger);
             _mediaDeviceMonitor = new MediaDeviceActivityMonitor(_logger);
             _securityEventCollector = new SecurityEventCollector(_logger);
+            _persistenceScanner = new PersistenceScanner(_logger);
+            _networkConnectionMonitor = new NetworkConnectionMonitor();
         }
     }
 
@@ -469,6 +475,139 @@ public class ActivityTracker : IDisposable
                             }
                         }
                     }
+
+                    // Scan persistence mechanisms every 30 minutes
+                    if (_persistenceScanner != null)
+                    {
+                        var minutesSinceLastScan = (DateTime.UtcNow - _lastPersistenceScan).TotalMinutes;
+                        
+                        if (minutesSinceLastScan >= 30.0)
+                        {
+                            try
+                            {
+                                _logger.Information("Scanning persistence mechanisms (every 30 minutes)");
+                                var changes = _persistenceScanner.GetChanges();
+                                
+                                if (changes.Count > 0)
+                                {
+                                    var payload = new
+                                    {
+                                        entries = changes.Select(e => new
+                                        {
+                                            type = e.Type,
+                                            location = e.Location,
+                                            name = e.Name,
+                                            displayName = e.DisplayName,
+                                            command = e.Command,
+                                            filePath = e.FilePath,
+                                            fileHash = e.FileHash,
+                                            startMode = e.StartMode,
+                                            serviceState = e.ServiceState,
+                                            serviceAccount = e.ServiceAccount,
+                                            taskStatus = e.TaskStatus,
+                                            taskAuthor = e.TaskAuthor,
+                                            threats = e.Threats,
+                                            riskScore = e.RiskScore,
+                                            riskLevel = e.RiskLevel,
+                                            isSuspicious = e.IsSuspicious,
+                                            changeType = e.ChangeType,
+                                            scannedAt = e.ScannedAt.ToString("o")
+                                        }).ToList(),
+                                        changeCount = changes.Count,
+                                        suspiciousCount = changes.Count(e => e.IsSuspicious),
+                                        scannedAt = DateTime.UtcNow.ToString("o")
+                                    };
+
+                                    // Queue to offline buffer
+                                    if (_offlineBuffer != null)
+                                    {
+                                        await _offlineBuffer.QueueAsync(EventTypes.PersistenceScan, payload, DateTime.UtcNow);
+                                    }
+
+                                    _logger.Information("Persistence scan completed: {Total} changes detected ({Suspicious} suspicious, {Added} added, {Modified} modified, {Removed} removed)",
+                                        changes.Count,
+                                        changes.Count(e => e.IsSuspicious),
+                                        changes.Count(e => e.ChangeType == "ADDED"),
+                                        changes.Count(e => e.ChangeType == "MODIFIED"),
+                                        changes.Count(e => e.ChangeType == "REMOVED"));
+                                }
+                                else
+                                {
+                                    _logger.Debug("No persistence changes detected");
+                                }
+
+                                _lastPersistenceScan = DateTime.UtcNow;
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.Error(ex, "Failed to scan persistence mechanisms");
+                            }
+                        }
+                    }
+
+                    // Monitor network connections every 5 minutes
+                    if (_networkConnectionMonitor != null)
+                    {
+                        var minutesSinceLastScan = (DateTime.UtcNow - _lastNetworkConnectionScan).TotalMinutes;
+                        
+                        if (minutesSinceLastScan >= 5.0)
+                        {
+                            try
+                            {
+                                _logger.Information("Collecting network connections (every 5 minutes)");
+                                var connections = await _networkConnectionMonitor.CollectConnectionsAsync();
+                                
+                                if (connections.Count > 0)
+                                {
+                                    var payload = new
+                                    {
+                                        connections = connections.Select(c => new
+                                        {
+                                            protocol = c.Protocol,
+                                            localAddress = c.LocalAddress,
+                                            localPort = c.LocalPort,
+                                            remoteAddress = c.RemoteAddress,
+                                            remotePort = c.RemotePort,
+                                            state = c.State,
+                                            pid = c.Pid,
+                                            processName = c.ProcessName,
+                                            processPath = c.ProcessPath,
+                                            country = c.Country,
+                                            city = c.City,
+                                            isp = c.Isp,
+                                            isThreatIp = c.IsThreatIp,
+                                            threatReason = c.ThreatReason,
+                                            capturedAt = c.CapturedAt.ToString("o")
+                                        }).ToList(),
+                                        connectionCount = connections.Count,
+                                        threatCount = connections.Count(c => c.IsThreatIp),
+                                        collectedAt = DateTime.UtcNow.ToString("o")
+                                    };
+
+                                    // Queue to offline buffer
+                                    if (_offlineBuffer != null)
+                                    {
+                                        await _offlineBuffer.QueueAsync(EventTypes.NetworkConnection, payload, DateTime.UtcNow);
+                                    }
+
+                                    _logger.Information("Network connection scan completed: {Total} connections ({Established} established, {Threat} threats detected)",
+                                        connections.Count,
+                                        connections.Count(c => c.State == "ESTABLISHED"),
+                                        connections.Count(c => c.IsThreatIp));
+                                }
+                                else
+                                {
+                                    _logger.Debug("No network connections to report");
+                                }
+
+                                _lastNetworkConnectionScan = DateTime.UtcNow;
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.Error(ex, "Failed to collect network connections");
+                            }
+                        }
+                    }
                 }
 
                 // Sample every 60 seconds to maintain lightweight footprint
@@ -681,5 +820,7 @@ public class ActivityTracker : IDisposable
         _bluetoothScanner?.Dispose();
         _mediaDeviceMonitor?.Dispose();
         _securityEventCollector?.Dispose();
+        _persistenceScanner?.Dispose();
+        _networkConnectionMonitor?.Dispose();
     }
 }

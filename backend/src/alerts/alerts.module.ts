@@ -1,13 +1,14 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Alert } from '../database/entities/alert.entity';
+import { TamperEvent } from '../database/entities/tamper-event.entity';
 import { AlertsController } from './alerts.controller';
 import { AlertsService } from './alerts.service';
 import { AuditModule } from '../audit/audit.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Alert]),
+    TypeOrmModule.forFeature([Alert, TamperEvent]),
     AuditModule,
   ],
   controllers: [AlertsController],

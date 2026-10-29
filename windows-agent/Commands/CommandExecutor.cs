@@ -1324,6 +1324,572 @@ public class CommandExecutor
                     }
                     break;
 
+                case "INSTALL_SOFTWARE":
+                    _logger.Information("Executing INSTALL_SOFTWARE command");
+                    
+                    string? packageId = null;
+                    string? packageName = null;
+                    string? packageVersion = null;
+                    string? deploymentId = null;
+                    string? fileUrl = null;
+                    string? fileHash = null;
+                    string? installCommand = null;
+                    bool silentInstall = true;
+                    bool requiresReboot = false;
+                    Dictionary<string, object>? installParameters = null;
+                    
+                    // Extract package details from payload
+                    if (command.payload.HasValue)
+                    {
+                        if (command.payload.Value.TryGetProperty("packageId", out var pkgIdElement))
+                            packageId = pkgIdElement.GetString();
+                        
+                        if (command.payload.Value.TryGetProperty("packageName", out var pkgNameElement))
+                            packageName = pkgNameElement.GetString();
+                        
+                        if (command.payload.Value.TryGetProperty("packageVersion", out var pkgVersionElement))
+                            packageVersion = pkgVersionElement.GetString();
+                        
+                        if (command.payload.Value.TryGetProperty("deploymentId", out var deplIdElement))
+                            deploymentId = deplIdElement.GetString();
+                        
+                        if (command.payload.Value.TryGetProperty("fileUrl", out var urlElement))
+                            fileUrl = urlElement.GetString();
+                        
+                        if (command.payload.Value.TryGetProperty("fileHash", out var hashElement))
+                            fileHash = hashElement.GetString();
+                        
+                        if (command.payload.Value.TryGetProperty("installCommand", out var cmdElement))
+                            installCommand = cmdElement.GetString();
+                        
+                        if (command.payload.Value.TryGetProperty("silentInstall", out var silentElement))
+                            silentInstall = silentElement.GetBoolean();
+                        
+                        if (command.payload.Value.TryGetProperty("requiresReboot", out var rebootElement))
+                            requiresReboot = rebootElement.GetBoolean();
+                        
+                        if (command.payload.Value.TryGetProperty("parameters", out var paramsElement))
+                        {
+                            installParameters = new Dictionary<string, object>();
+                            foreach (var prop in paramsElement.EnumerateObject())
+                            {
+                                installParameters[prop.Name] = prop.Value.ToString();
+                            }
+                        }
+                    }
+
+                    if (string.IsNullOrWhiteSpace(fileUrl))
+                    {
+                        status = "FAILED";
+                        errorMessage = "No fileUrl provided in payload";
+                        break;
+                    }
+
+                    if (string.IsNullOrWhiteSpace(installCommand))
+                    {
+                        status = "FAILED";
+                        errorMessage = "No installCommand provided in payload";
+                        break;
+                    }
+
+                    string? downloadedFilePath = null;
+
+                    try
+                    {
+                        _logger.Information("Installing software package: {PackageName} v{Version}", packageName ?? "Unknown", packageVersion ?? "Unknown");
+                        
+                        // Step 1: Update deployment status to DOWNLOADING
+                        if (!string.IsNullOrEmpty(deploymentId))
+                        {
+                            _ = Task.Run(async () =>
+                            {
+                                try
+                                {
+                                    await _client.PutAsync<object>($"/software/deployments/{deploymentId}/status", new
+                                    {
+                                        status = "DOWNLOADING",
+                                        progress = new { currentStep = "Downloading installer", downloadProgress = 0 }
+                                    }, cancellationToken);
+                                }
+                                catch (Exception ex)
+                                {
+                                    _logger.Warning(ex, "Failed to update deployment status to DOWNLOADING");
+                                }
+                            });
+                        }
+
+                        // Step 2: Download the installer file
+                        _logger.Information("Downloading installer from: {Url}", fileUrl);
+                        
+                        var fileName = Path.GetFileName(new Uri(fileUrl).LocalPath);
+                        downloadedFilePath = Path.Combine(Path.GetTempPath(), $"sentinel-install-{Guid.NewGuid()}-{fileName}");
+                        
+                        using (var httpClient = new System.Net.Http.HttpClient())
+                        {
+                            httpClient.Timeout = TimeSpan.FromMinutes(30); // 30 minute download timeout
+                            
+                            var downloadResponse = await httpClient.GetAsync(fileUrl, cancellationToken);
+                            
+                            if (!downloadResponse.IsSuccessStatusCode)
+                            {
+                                status = "FAILED";
+                                errorMessage = $"Download failed: HTTP {downloadResponse.StatusCode}";
+                                _logger.Error("Download failed with status: {StatusCode}", downloadResponse.StatusCode);
+                                break;
+                            }
+
+                            using (var fileStream = new FileStream(downloadedFilePath, FileMode.Create, FileAccess.Write, FileShare.None))
+                            {
+                                await downloadResponse.Content.CopyToAsync(fileStream, cancellationToken);
+                            }
+                        }
+
+                        var fileInfo = new FileInfo(downloadedFilePath);
+                        _logger.Information("Download completed: {Size} MB", fileInfo.Length / (1024.0 * 1024.0));
+
+                        // Step 3: Verify file hash if provided
+                        if (!string.IsNullOrEmpty(fileHash) && fileHash.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase))
+                        {
+                            _logger.Information("Verifying file integrity with SHA-256 hash");
+                            
+                            var expectedHash = fileHash.Substring(7).ToLowerInvariant(); // Remove "sha256:" prefix
+                            
+                            using (var sha256 = System.Security.Cryptography.SHA256.Create())
+                            using (var fileStream = File.OpenRead(downloadedFilePath))
+                            {
+                                var computedHashBytes = await sha256.ComputeHashAsync(fileStream, cancellationToken);
+                                var computedHash = BitConverter.ToString(computedHashBytes).Replace("-", "").ToLowerInvariant();
+                                
+                                if (computedHash != expectedHash)
+                                {
+                                    status = "FAILED";
+                                    errorMessage = $"Hash verification failed. Expected: {expectedHash}, Got: {computedHash}";
+                                    _logger.Error("File hash mismatch - possible corruption or tampering");
+                                    
+                                    // Delete corrupted file
+                                    try { File.Delete(downloadedFilePath); } catch { }
+                                    
+                                    break;
+                                }
+                                
+                                _logger.Information("Hash verification successful");
+                            }
+                        }
+
+                        // Step 4: Update deployment status to INSTALLING
+                        if (!string.IsNullOrEmpty(deploymentId))
+                        {
+                            _ = Task.Run(async () =>
+                            {
+                                try
+                                {
+                                    await _client.PutAsync<object>($"/software/deployments/{deploymentId}/status", new
+                                    {
+                                        status = "INSTALLING",
+                                        progress = new { currentStep = "Executing installer", installProgress = 0 }
+                                    }, cancellationToken);
+                                }
+                                catch (Exception ex)
+                                {
+                                    _logger.Warning(ex, "Failed to update deployment status to INSTALLING");
+                                }
+                            });
+                        }
+
+                        // Step 5: Execute the install command
+                        _logger.Information("Executing install command: {Command}", installCommand);
+                        
+                        // Replace {filePath} placeholder with actual downloaded file path
+                        var finalInstallCommand = installCommand.Replace("{filePath}", $"\"{downloadedFilePath}\"");
+                        
+                        // Add custom parameters if provided
+                        if (installParameters != null && installParameters.Count > 0)
+                        {
+                            foreach (var param in installParameters)
+                            {
+                                finalInstallCommand = finalInstallCommand.Replace($"{{{param.Key}}}", param.Value.ToString());
+                            }
+                        }
+
+                        var installProcess = new Process
+                        {
+                            StartInfo = new ProcessStartInfo
+                            {
+                                FileName = "cmd.exe",
+                                Arguments = $"/c {finalInstallCommand}",
+                                UseShellExecute = false,
+                                RedirectStandardOutput = true,
+                                RedirectStandardError = true,
+                                CreateNoWindow = true,
+                                WorkingDirectory = Path.GetTempPath()
+                            }
+                        };
+
+                        var installOutput = new List<string>();
+                        var installErrors = new List<string>();
+
+                        installProcess.OutputDataReceived += (sender, e) =>
+                        {
+                            if (!string.IsNullOrEmpty(e.Data))
+                            {
+                                installOutput.Add(e.Data);
+                                _logger.Debug("Install output: {Line}", e.Data);
+                            }
+                        };
+
+                        installProcess.ErrorDataReceived += (sender, e) =>
+                        {
+                            if (!string.IsNullOrEmpty(e.Data))
+                            {
+                                installErrors.Add(e.Data);
+                                _logger.Warning("Install error: {Line}", e.Data);
+                            }
+                        };
+
+                        installProcess.Start();
+                        installProcess.BeginOutputReadLine();
+                        installProcess.BeginErrorReadLine();
+
+                        // Wait for installation to complete (30 minute timeout)
+                        var installCompleted = installProcess.WaitForExit(1800000);
+                        
+                        if (!installCompleted)
+                        {
+                            installProcess.Kill(entireProcessTree: true);
+                            status = "FAILED";
+                            errorMessage = "Installation timeout (30 minutes)";
+                            _logger.Error("Installation timed out");
+                        }
+                        else
+                        {
+                            var installExitCode = installProcess.ExitCode;
+                            _logger.Information("Installation completed with exit code: {ExitCode}", installExitCode);
+
+                            // Common Windows installer exit codes
+                            // 0 = Success
+                            // 3010 = Success but reboot required
+                            // 1641 = Success, installer initiated reboot
+                            if (installExitCode == 0 || installExitCode == 3010 || installExitCode == 1641)
+                            {
+                                status = "COMPLETED";
+                                
+                                resultData["packageId"] = packageId ?? "unknown";
+                                resultData["packageName"] = packageName ?? "unknown";
+                                resultData["packageVersion"] = packageVersion ?? "unknown";
+                                resultData["deploymentId"] = deploymentId ?? "unknown";
+                                resultData["installedAt"] = DateTime.UtcNow.ToString("o");
+                                resultData["exitCode"] = installExitCode;
+                                resultData["downloadedSizeMB"] = fileInfo.Length / (1024.0 * 1024.0);
+                                resultData["requiresReboot"] = requiresReboot || installExitCode == 3010 || installExitCode == 1641;
+                                
+                                if (installExitCode == 3010 || installExitCode == 1641)
+                                {
+                                    resultData["rebootReason"] = "Installer reported reboot required";
+                                }
+                                
+                                if (installOutput.Count > 0)
+                                {
+                                    resultData["outputLines"] = string.Join("\n", installOutput.Take(20));
+                                }
+
+                                _logger.Information("Software installation successful: {PackageName}", packageName ?? "Unknown");
+                                
+                                // Update deployment status to COMPLETED
+                                if (!string.IsNullOrEmpty(deploymentId))
+                                {
+                                    _ = Task.Run(async () =>
+                                    {
+                                        try
+                                        {
+                                            await _client.PutAsync<object>($"/software/deployments/{deploymentId}/status", new
+                                            {
+                                                status = "COMPLETED",
+                                                result = new
+                                                {
+                                                    success = true,
+                                                    exitCode = installExitCode,
+                                                    output = string.Join("\n", installOutput.Take(50)),
+                                                    rebootRequired = requiresReboot || installExitCode == 3010 || installExitCode == 1641
+                                                }
+                                            }, cancellationToken);
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            _logger.Warning(ex, "Failed to update deployment status to COMPLETED");
+                                        }
+                                    });
+                                }
+                            }
+                            else
+                            {
+                                status = "FAILED";
+                                errorMessage = $"Installation failed with exit code {installExitCode}";
+                                _logger.Error("Installation failed with exit code: {ExitCode}", installExitCode);
+                                
+                                resultData["exitCode"] = installExitCode;
+                                resultData["errorOutput"] = string.Join("\n", installErrors.Take(20));
+                                
+                                // Update deployment status to FAILED
+                                if (!string.IsNullOrEmpty(deploymentId))
+                                {
+                                    _ = Task.Run(async () =>
+                                    {
+                                        try
+                                        {
+                                            await _client.PutAsync<object>($"/software/deployments/{deploymentId}/status", new
+                                            {
+                                                status = "FAILED",
+                                                result = new
+                                                {
+                                                    success = false,
+                                                    exitCode = installExitCode,
+                                                    error = string.Join("\n", installErrors.Take(50))
+                                                },
+                                                failureDetails = new
+                                                {
+                                                    stage = "INSTALLATION",
+                                                    error = errorMessage,
+                                                    errorType = "NON_ZERO_EXIT_CODE",
+                                                    timestamp = DateTime.UtcNow
+                                                }
+                                            }, cancellationToken);
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            _logger.Warning(ex, "Failed to update deployment status to FAILED");
+                                        }
+                                    });
+                                }
+                            }
+                        }
+
+                        // Cleanup: Delete downloaded installer file
+                        try
+                        {
+                            if (File.Exists(downloadedFilePath))
+                            {
+                                File.Delete(downloadedFilePath);
+                                _logger.Information("Cleaned up downloaded installer file");
+                            }
+                        }
+                        catch (Exception cleanupEx)
+                        {
+                            _logger.Warning(cleanupEx, "Failed to delete installer file: {Path}", downloadedFilePath);
+                        }
+                    }
+                    catch (System.Net.Http.HttpRequestException httpEx)
+                    {
+                        status = "FAILED";
+                        errorMessage = $"Download failed: {httpEx.Message}";
+                        _logger.Error(httpEx, "HTTP download error");
+                        
+                        // Update deployment status to FAILED
+                        if (!string.IsNullOrEmpty(deploymentId))
+                        {
+                            _ = Task.Run(async () =>
+                            {
+                                try
+                                {
+                                    await _client.PutAsync<object>($"/software/deployments/{deploymentId}/status", new
+                                    {
+                                        status = "FAILED",
+                                        failureDetails = new
+                                        {
+                                            stage = "DOWNLOADING",
+                                            error = errorMessage,
+                                            errorType = "NETWORK_ERROR",
+                                            timestamp = DateTime.UtcNow
+                                        }
+                                    }, cancellationToken);
+                                }
+                                catch { }
+                            });
+                        }
+                    }
+                    catch (Exception installEx)
+                    {
+                        status = "FAILED";
+                        errorMessage = $"Software installation error: {installEx.Message}";
+                        _logger.Error(installEx, "INSTALL_SOFTWARE execution failed");
+                        
+                        // Cleanup on error
+                        if (!string.IsNullOrEmpty(downloadedFilePath))
+                        {
+                            try { File.Delete(downloadedFilePath); } catch { }
+                        }
+                        
+                        // Update deployment status to FAILED
+                        if (!string.IsNullOrEmpty(deploymentId))
+                        {
+                            _ = Task.Run(async () =>
+                            {
+                                try
+                                {
+                                    await _client.PutAsync<object>($"/software/deployments/{deploymentId}/status", new
+                                    {
+                                        status = "FAILED",
+                                        failureDetails = new
+                                        {
+                                            stage = "EXECUTION",
+                                            error = errorMessage,
+                                            errorType = "EXCEPTION",
+                                            timestamp = DateTime.UtcNow
+                                        }
+                                    }, cancellationToken);
+                                }
+                                catch { }
+                            });
+                        }
+                    }
+                    break;
+
+                case "UNINSTALL_SOFTWARE":
+                    _logger.Information("Executing UNINSTALL_SOFTWARE command");
+                    
+                    string? uninstallPackageId = null;
+                    string? uninstallPackageName = null;
+                    string? uninstallPackageVersion = null;
+                    string? uninstallCommand = null;
+                    bool uninstallRequiresReboot = false;
+                    
+                    // Extract package details from payload
+                    if (command.payload.HasValue)
+                    {
+                        if (command.payload.Value.TryGetProperty("packageId", out var pkgIdElement))
+                            uninstallPackageId = pkgIdElement.GetString();
+                        
+                        if (command.payload.Value.TryGetProperty("packageName", out var pkgNameElement))
+                            uninstallPackageName = pkgNameElement.GetString();
+                        
+                        if (command.payload.Value.TryGetProperty("packageVersion", out var pkgVersionElement))
+                            uninstallPackageVersion = pkgVersionElement.GetString();
+                        
+                        if (command.payload.Value.TryGetProperty("uninstallCommand", out var cmdElement))
+                            uninstallCommand = cmdElement.GetString();
+                        
+                        if (command.payload.Value.TryGetProperty("requiresReboot", out var rebootElement))
+                            uninstallRequiresReboot = rebootElement.GetBoolean();
+                    }
+
+                    if (string.IsNullOrWhiteSpace(uninstallCommand))
+                    {
+                        status = "FAILED";
+                        errorMessage = "No uninstallCommand provided in payload";
+                        break;
+                    }
+
+                    try
+                    {
+                        _logger.Information("Uninstalling software package: {PackageName} v{Version}", 
+                            uninstallPackageName ?? "Unknown", uninstallPackageVersion ?? "Unknown");
+                        
+                        _logger.Information("Executing uninstall command: {Command}", uninstallCommand);
+                        
+                        var uninstallProcess = new Process
+                        {
+                            StartInfo = new ProcessStartInfo
+                            {
+                                FileName = "cmd.exe",
+                                Arguments = $"/c {uninstallCommand}",
+                                UseShellExecute = false,
+                                RedirectStandardOutput = true,
+                                RedirectStandardError = true,
+                                CreateNoWindow = true,
+                                WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System)
+                            }
+                        };
+
+                        var uninstallOutput = new List<string>();
+                        var uninstallErrors = new List<string>();
+
+                        uninstallProcess.OutputDataReceived += (sender, e) =>
+                        {
+                            if (!string.IsNullOrEmpty(e.Data))
+                            {
+                                uninstallOutput.Add(e.Data);
+                                _logger.Debug("Uninstall output: {Line}", e.Data);
+                            }
+                        };
+
+                        uninstallProcess.ErrorDataReceived += (sender, e) =>
+                        {
+                            if (!string.IsNullOrEmpty(e.Data))
+                            {
+                                uninstallErrors.Add(e.Data);
+                                _logger.Warning("Uninstall error: {Line}", e.Data);
+                            }
+                        };
+
+                        uninstallProcess.Start();
+                        uninstallProcess.BeginOutputReadLine();
+                        uninstallProcess.BeginErrorReadLine();
+
+                        // Wait for uninstallation to complete (15 minute timeout)
+                        var uninstallCompleted = uninstallProcess.WaitForExit(900000);
+                        
+                        if (!uninstallCompleted)
+                        {
+                            uninstallProcess.Kill(entireProcessTree: true);
+                            status = "FAILED";
+                            errorMessage = "Uninstallation timeout (15 minutes)";
+                            _logger.Error("Uninstallation timed out");
+                        }
+                        else
+                        {
+                            var uninstallExitCode = uninstallProcess.ExitCode;
+                            _logger.Information("Uninstallation completed with exit code: {ExitCode}", uninstallExitCode);
+
+                            // Common uninstaller exit codes
+                            // 0 = Success
+                            // 3010 = Success but reboot required
+                            // 1605 = Product not found (already uninstalled) - treat as success
+                            if (uninstallExitCode == 0 || uninstallExitCode == 3010 || uninstallExitCode == 1605)
+                            {
+                                status = "COMPLETED";
+                                
+                                resultData["packageId"] = uninstallPackageId ?? "unknown";
+                                resultData["packageName"] = uninstallPackageName ?? "unknown";
+                                resultData["packageVersion"] = uninstallPackageVersion ?? "unknown";
+                                resultData["uninstalledAt"] = DateTime.UtcNow.ToString("o");
+                                resultData["exitCode"] = uninstallExitCode;
+                                resultData["requiresReboot"] = uninstallRequiresReboot || uninstallExitCode == 3010;
+                                
+                                if (uninstallExitCode == 1605)
+                                {
+                                    resultData["note"] = "Product not found - may have been already uninstalled";
+                                }
+                                
+                                if (uninstallExitCode == 3010)
+                                {
+                                    resultData["rebootReason"] = "Uninstaller reported reboot required";
+                                }
+                                
+                                if (uninstallOutput.Count > 0)
+                                {
+                                    resultData["outputLines"] = string.Join("\n", uninstallOutput.Take(20));
+                                }
+
+                                _logger.Information("Software uninstallation successful: {PackageName}", uninstallPackageName ?? "Unknown");
+                            }
+                            else
+                            {
+                                status = "FAILED";
+                                errorMessage = $"Uninstallation failed with exit code {uninstallExitCode}";
+                                _logger.Error("Uninstallation failed with exit code: {ExitCode}", uninstallExitCode);
+                                
+                                resultData["exitCode"] = uninstallExitCode;
+                                resultData["errorOutput"] = string.Join("\n", uninstallErrors.Take(20));
+                            }
+                        }
+                    }
+                    catch (Exception uninstallEx)
+                    {
+                        status = "FAILED";
+                        errorMessage = $"Software uninstallation error: {uninstallEx.Message}";
+                        _logger.Error(uninstallEx, "UNINSTALL_SOFTWARE execution failed");
+                    }
+                    break;
+
                 default:
                     status = "FAILED";
                     errorMessage = $"Unsupported command type: {command.actionType}";

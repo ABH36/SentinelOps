@@ -79,4 +79,6 @@ public static class EventTypes
     public const string BluetoothScan = "bluetooth_scan";
     public const string MediaActivity = "media_activity";
     public const string SecurityEvent = "security_event";
+    public const string PersistenceScan = "persistence_scan";
+    public const string NetworkConnection = "network_connection";
 }

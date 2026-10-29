@@ -108,6 +108,9 @@ class SentinelApplication : Application() {
                 Timber.w("⚠️ Some anti-tamper protections failed: ${result.successfulProtections}/${result.totalProtections}")
                 Timber.w("Failed protections: ${result.details.filter { !it.value }.keys}")
             }
+            
+            // Apply critical user restrictions (Device Owner mode required for full effectiveness)
+            applyUserRestrictions(dpm, adminComponent)
         } else {
             Timber.w("⚠️ Device admin not active - anti-tamper protections cannot be applied")
             Timber.w("App can be uninstalled by user")
@@ -117,6 +120,96 @@ class SentinelApplication : Application() {
         requestBatteryOptimizationExclusion()
 
         Timber.i("✓ Security hardening complete")
+    }
+
+    /**
+     * Apply critical user restrictions to lock down device security.
+     * 
+     * Restrictions applied:
+     * - DISALLOW_FACTORY_RESET: Prevents factory reset via settings (protects data and enrollment)
+     * - DISALLOW_SAFE_BOOT: Prevents booting into safe mode (prevents bypass of agent)
+     * - DISALLOW_DEBUGGING_FEATURES: Blocks ADB debugging (prevents unauthorized access)
+     * - DISALLOW_MOUNT_PHYSICAL_MEDIA: Prevents mounting external storage for data exfiltration
+     * 
+     * Note: These restrictions require Device Owner mode for full enforcement.
+     * In Device Admin mode, restrictions may only apply partially.
+     * 
+     * @param dpm DevicePolicyManager instance
+     * @param adminComponent Admin receiver component
+     */
+    private fun applyUserRestrictions(
+        dpm: DevicePolicyManager,
+        adminComponent: ComponentName
+    ) {
+        Timber.i("🔒 Applying critical user restrictions...")
+        
+        val isDeviceOwner = dpm.isDeviceOwnerApp(packageName)
+        
+        if (!isDeviceOwner) {
+            Timber.w("⚠️ Not in Device Owner mode - some restrictions may not be fully enforced")
+        }
+        
+        var successCount = 0
+        var totalCount = 0
+        
+        // 1. DISALLOW_FACTORY_RESET - Prevents factory reset via settings
+        try {
+            totalCount++
+            dpm.addUserRestriction(adminComponent, android.os.UserManager.DISALLOW_FACTORY_RESET)
+            Timber.i("✓ Factory reset BLOCKED")
+            successCount++
+        } catch (e: SecurityException) {
+            Timber.e(e, "❌ Failed to block factory reset (requires Device Owner)")
+        } catch (e: Exception) {
+            Timber.e(e, "❌ Unexpected error blocking factory reset")
+        }
+        
+        // 2. DISALLOW_SAFE_BOOT - Prevents booting into safe mode
+        try {
+            totalCount++
+            dpm.addUserRestriction(adminComponent, android.os.UserManager.DISALLOW_SAFE_BOOT)
+            Timber.i("✓ Safe mode boot BLOCKED")
+            successCount++
+        } catch (e: SecurityException) {
+            Timber.e(e, "❌ Failed to block safe mode (requires Device Owner)")
+        } catch (e: Exception) {
+            Timber.e(e, "❌ Unexpected error blocking safe mode")
+        }
+        
+        // 3. DISALLOW_DEBUGGING_FEATURES - Blocks ADB debugging and developer options
+        try {
+            totalCount++
+            dpm.addUserRestriction(adminComponent, android.os.UserManager.DISALLOW_DEBUGGING_FEATURES)
+            Timber.i("✓ ADB debugging BLOCKED")
+            successCount++
+        } catch (e: SecurityException) {
+            Timber.e(e, "❌ Failed to block debugging features (requires Device Owner)")
+        } catch (e: Exception) {
+            Timber.e(e, "❌ Unexpected error blocking debugging features")
+        }
+        
+        // 4. DISALLOW_MOUNT_PHYSICAL_MEDIA - Prevents mounting external storage (SD cards, USB)
+        try {
+            totalCount++
+            dpm.addUserRestriction(adminComponent, android.os.UserManager.DISALLOW_MOUNT_PHYSICAL_MEDIA)
+            Timber.i("✓ Physical media mounting BLOCKED")
+            successCount++
+        } catch (e: SecurityException) {
+            Timber.e(e, "❌ Failed to block physical media mounting (requires Device Owner)")
+        } catch (e: Exception) {
+            Timber.e(e, "❌ Unexpected error blocking physical media mounting")
+        }
+        
+        // Summary
+        if (successCount == totalCount) {
+            Timber.i("✅ All $totalCount user restrictions applied successfully")
+        } else {
+            Timber.w("⚠️ Applied $successCount/$totalCount user restrictions")
+            if (!isDeviceOwner) {
+                Timber.w("💡 Set Device Owner mode for full restriction enforcement:")
+                Timber.w("   adb shell dpm set-device-owner ${packageName}/.admin.SentinelDeviceAdminReceiver")
+            }
+        }
     }
 
     /**

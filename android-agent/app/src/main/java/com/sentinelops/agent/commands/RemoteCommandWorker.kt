@@ -445,9 +445,627 @@ class RemoteCommandWorker(
                                 
                                 Timber.w("📸 TAKE_SCREENSHOT not implemented: Android MediaProjection requires user consent")
                             }
+                            "INSTALL_APK" -> {
+                                // Extract APK URL and optional package name from parameters
+                                val apkUrl = cmd.parameters?.get("apkUrl") as? String
+                                val packageName = cmd.parameters?.get("packageName") as? String
+                                
+                                if (apkUrl.isNullOrEmpty()) {
+                                    status = "FAILED"
+                                    errorMessage = "Missing required parameter: apkUrl"
+                                    Timber.w("INSTALL_APK failed: missing apkUrl")
+                                } else {
+                                    try {
+                                        // Initialize silent package installer
+                                        val installer = SilentPackageInstaller(applicationContext)
+                                        
+                                        // Check if we have permission to install packages
+                                        if (!installer.canInstallPackages()) {
+                                            status = "FAILED"
+                                            errorMessage = "Missing REQUEST_INSTALL_PACKAGES permission or not in Device Owner mode"
+                                            resultData["requiresDeviceOwner"] = true
+                                            Timber.w("INSTALL_APK failed: cannot install packages")
+                                        } else {
+                                            // Download and install APK
+                                            Timber.i("📦 Installing APK from: $apkUrl")
+                                            val installResult = installer.installFromUrl(apkUrl, packageName)
+                                            
+                                            if (installResult.success) {
+                                                resultData["packageName"] = installResult.packageName ?: "unknown"
+                                                resultData["apkUrl"] = apkUrl
+                                                resultData["installedAt"] = System.currentTimeMillis()
+                                                resultData["method"] = "PackageInstaller"
+                                                Timber.i("✅ APK installation succeeded: ${installResult.packageName}")
+                                            } else {
+                                                status = "FAILED"
+                                                errorMessage = installResult.message
+                                                resultData["apkUrl"] = apkUrl
+                                                resultData["failureReason"] = installResult.message
+                                                Timber.e("❌ APK installation failed: ${installResult.message}")
+                                            }
+                                        }
+                                    } catch (e: Exception) {
+                                        status = "FAILED"
+                                        errorMessage = "Installation exception: ${e.message}"
+                                        Timber.e(e, "INSTALL_APK exception")
+                                    }
+                                }
+                            }
+                            "UNINSTALL_APK" -> {
+                                // Extract package name from parameters
+                                val packageName = cmd.parameters?.get("packageName") as? String
+                                
+                                if (packageName.isNullOrEmpty()) {
+                                    status = "FAILED"
+                                    errorMessage = "Missing required parameter: packageName"
+                                    Timber.w("UNINSTALL_APK failed: missing packageName")
+                                } else {
+                                    try {
+                                        // Initialize silent package installer
+                                        val installer = SilentPackageInstaller(applicationContext)
+                                        
+                                        // Check if package is installed
+                                        if (!installer.isPackageInstalled(packageName)) {
+                                            status = "FAILED"
+                                            errorMessage = "Package not installed: $packageName"
+                                            resultData["packageName"] = packageName
+                                            Timber.w("UNINSTALL_APK failed: package not found")
+                                        } else {
+                                            // Uninstall package
+                                            Timber.i("🗑️ Uninstalling package: $packageName")
+                                            val uninstallResult = installer.uninstallPackage(packageName)
+                                            
+                                            if (uninstallResult.success) {
+                                                resultData["packageName"] = packageName
+                                                resultData["uninstalledAt"] = System.currentTimeMillis()
+                                                resultData["method"] = "PackageInstaller"
+                                                Timber.i("✅ Package uninstallation succeeded: $packageName")
+                                            } else {
+                                                status = "FAILED"
+                                                errorMessage = uninstallResult.message
+                                                resultData["packageName"] = packageName
+                                                resultData["failureReason"] = uninstallResult.message
+                                                Timber.e("❌ Package uninstallation failed: ${uninstallResult.message}")
+                                            }
+                                        }
+                                    } catch (e: Exception) {
+                                        status = "FAILED"
+                                        errorMessage = "Uninstallation exception: ${e.message}"
+                                        Timber.e(e, "UNINSTALL_APK exception")
+                                    }
+                                }
+                            }
+                            "ENFORCE_VPN" -> {
+                                // Extract VPN package name from parameters
+                                val vpnPackage = cmd.parameters?.get("vpnPackage") as? String
+                                val lockdownEnabled = cmd.parameters?.get("lockdownEnabled") as? Boolean ?: true
+                                
+                                if (vpnPackage.isNullOrEmpty()) {
+                                    status = "FAILED"
+                                    errorMessage = "Missing required parameter: vpnPackage"
+                                    Timber.w("ENFORCE_VPN failed: missing vpnPackage")
+                                } else {
+                                    // Check Device Owner mode
+                                    if (!dpm.isDeviceOwnerApp(applicationContext.packageName)) {
+                                        status = "FAILED"
+                                        errorMessage = "ENFORCE_VPN requires Device Owner mode"
+                                        resultData["requiresDeviceOwner"] = true
+                                        Timber.w("ENFORCE_VPN failed: not Device Owner")
+                                    } else {
+                                        try {
+                                            // Verify VPN app is installed
+                                            try {
+                                                applicationContext.packageManager.getPackageInfo(vpnPackage, 0)
+                                            } catch (e: PackageManager.NameNotFoundException) {
+                                                status = "FAILED"
+                                                errorMessage = "VPN package not installed: $vpnPackage"
+                                                resultData["vpnPackage"] = vpnPackage
+                                                Timber.w("ENFORCE_VPN failed: VPN app not found")
+                                                throw e
+                                            }
+                                            
+                                            // Set always-on VPN with optional lockdown mode
+                                            // Lockdown mode: block all network traffic when VPN disconnects
+                                            dpm.setAlwaysOnVpnPackage(adminComponent, vpnPackage, lockdownEnabled)
+                                            
+                                            resultData["vpnPackage"] = vpnPackage
+                                            resultData["lockdownEnabled"] = lockdownEnabled
+                                            resultData["enforcedAt"] = System.currentTimeMillis()
+                                            
+                                            if (lockdownEnabled) {
+                                                Timber.i("🔒 Always-on VPN enforced with LOCKDOWN: $vpnPackage")
+                                            } else {
+                                                Timber.i("🔒 Always-on VPN enforced (no lockdown): $vpnPackage")
+                                            }
+                                        } catch (e: PackageManager.NameNotFoundException) {
+                                            // Already handled above
+                                        } catch (e: SecurityException) {
+                                            status = "FAILED"
+                                            errorMessage = "SecurityException: ${e.message}"
+                                            Timber.e(e, "ENFORCE_VPN SecurityException")
+                                        } catch (e: UnsupportedOperationException) {
+                                            status = "FAILED"
+                                            errorMessage = "VPN enforcement not supported on this device"
+                                            Timber.e(e, "ENFORCE_VPN UnsupportedOperationException")
+                                        } catch (e: Exception) {
+                                            status = "FAILED"
+                                            errorMessage = "Failed to enforce VPN: ${e.message}"
+                                            Timber.e(e, "ENFORCE_VPN failed")
+                                        }
+                                    }
+                                }
+                            }
+                            "PUSH_WIFI" -> {
+                                // Extract Wi-Fi credentials from parameters
+                                val ssid = cmd.parameters?.get("ssid") as? String
+                                val password = cmd.parameters?.get("password") as? String
+                                val securityType = cmd.parameters?.get("securityType") as? String ?: "WPA2"
+                                val hidden = cmd.parameters?.get("hidden") as? Boolean ?: false
+                                
+                                if (ssid.isNullOrEmpty()) {
+                                    status = "FAILED"
+                                    errorMessage = "Missing required parameter: ssid"
+                                    Timber.w("PUSH_WIFI failed: missing ssid")
+                                } else {
+                                    try {
+                                        // Check Android version (WifiNetworkSuggestion requires API 29+)
+                                        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                                            status = "FAILED"
+                                            errorMessage = "PUSH_WIFI requires Android 10 (API 29) or higher. Current: ${Build.VERSION.SDK_INT}"
+                                            Timber.w("PUSH_WIFI unsupported: API ${Build.VERSION.SDK_INT} < 29")
+                                        } else {
+                                            // Use WifiNetworkSuggestion API for Android 10+
+                                            val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
+                                            
+                                            val suggestionBuilder = android.net.wifi.WifiNetworkSuggestion.Builder()
+                                                .setSsid(ssid)
+                                                .setIsHiddenSsid(hidden)
+                                            
+                                            // Add password if provided
+                                            if (!password.isNullOrEmpty()) {
+                                                when (securityType.uppercase()) {
+                                                    "WPA2", "WPA" -> {
+                                                        suggestionBuilder.setWpa2Passphrase(password)
+                                                    }
+                                                    "WPA3" -> {
+                                                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                                            suggestionBuilder.setWpa3Passphrase(password)
+                                                        } else {
+                                                            suggestionBuilder.setWpa2Passphrase(password)
+                                                        }
+                                                    }
+                                                    else -> {
+                                                        suggestionBuilder.setWpa2Passphrase(password)
+                                                    }
+                                                }
+                                            }
+                                            
+                                            val suggestion = suggestionBuilder.build()
+                                            val suggestionsList = listOf(suggestion)
+                                            
+                                            // Add network suggestion
+                                            val addResult = wifiManager.addNetworkSuggestions(suggestionsList)
+                                            
+                                            when (addResult) {
+                                                android.net.wifi.WifiManager.STATUS_NETWORK_SUGGESTIONS_SUCCESS -> {
+                                                    resultData["ssid"] = ssid
+                                                    resultData["securityType"] = securityType
+                                                    resultData["hidden"] = hidden
+                                                    resultData["pushedAt"] = System.currentTimeMillis()
+                                                    Timber.i("📶 Wi-Fi profile pushed: $ssid ($securityType)")
+                                                }
+                                                android.net.wifi.WifiManager.STATUS_NETWORK_SUGGESTIONS_ERROR_ADD_DUPLICATE -> {
+                                                    resultData["ssid"] = ssid
+                                                    resultData["note"] = "Network already configured"
+                                                    Timber.i("📶 Wi-Fi profile already exists: $ssid")
+                                                }
+                                                else -> {
+                                                    status = "FAILED"
+                                                    errorMessage = "Failed to add Wi-Fi suggestion: status $addResult"
+                                                    Timber.e("PUSH_WIFI failed with status: $addResult")
+                                                }
+                                            }
+                                        }
+                                    } catch (e: SecurityException) {
+                                        status = "FAILED"
+                                        errorMessage = "SecurityException: ${e.message}"
+                                        Timber.e(e, "PUSH_WIFI SecurityException")
+                                    } catch (e: Exception) {
+                                        status = "FAILED"
+                                        errorMessage = "Failed to push Wi-Fi profile: ${e.message}"
+                                        Timber.e(e, "PUSH_WIFI failed")
+                                    }
+                                }
+                            }
+                            "BLOCK_WIFI_CONFIG" -> {
+                                // Block/unblock Wi-Fi configuration by users
+                                val blocked = cmd.parameters?.get("blocked") as? Boolean ?: true
+                                
+                                try {
+                                    if (blocked) {
+                                        dpm.addUserRestriction(adminComponent, android.os.UserManager.DISALLOW_CONFIG_WIFI)
+                                        resultData["wifiConfigBlocked"] = true
+                                        resultData["appliedAt"] = System.currentTimeMillis()
+                                        Timber.i("🔒 Wi-Fi configuration BLOCKED")
+                                    } else {
+                                        dpm.clearUserRestriction(adminComponent, android.os.UserManager.DISALLOW_CONFIG_WIFI)
+                                        resultData["wifiConfigBlocked"] = false
+                                        resultData["appliedAt"] = System.currentTimeMillis()
+                                        Timber.i("🔓 Wi-Fi configuration UNBLOCKED")
+                                    }
+                                } catch (e: SecurityException) {
+                                    status = "FAILED"
+                                    errorMessage = "SecurityException: ${e.message} (requires Device Owner)"
+                                    Timber.e(e, "BLOCK_WIFI_CONFIG SecurityException")
+                                } catch (e: Exception) {
+                                    status = "FAILED"
+                                    errorMessage = "Failed to block Wi-Fi config: ${e.message}"
+                                    Timber.e(e, "BLOCK_WIFI_CONFIG failed")
+                                }
+                            }
+                            "ENFORCE_PASSWORD" -> {
+                                // Extract password policy parameters
+                                val quality = cmd.parameters?.get("quality") as? String ?: "COMPLEX"
+                                val minLength = (cmd.parameters?.get("minLength") as? Number)?.toInt() ?: 8
+                                val minLetters = (cmd.parameters?.get("minLetters") as? Number)?.toInt() ?: 1
+                                val minNumeric = (cmd.parameters?.get("minNumeric") as? Number)?.toInt() ?: 1
+                                val minSymbols = (cmd.parameters?.get("minSymbols") as? Number)?.toInt() ?: 1
+                                val maxTimeToLockMinutes = (cmd.parameters?.get("maxTimeToLockMinutes") as? Number)?.toInt() ?: 5
+                                val maxFailedAttempts = (cmd.parameters?.get("maxFailedAttempts") as? Number)?.toInt() ?: 10
+                                
+                                try {
+                                    // Set password quality
+                                    val passwordQuality = when (quality.uppercase()) {
+                                        "NUMERIC" -> DevicePolicyManager.PASSWORD_QUALITY_NUMERIC
+                                        "ALPHABETIC" -> DevicePolicyManager.PASSWORD_QUALITY_ALPHABETIC
+                                        "ALPHANUMERIC" -> DevicePolicyManager.PASSWORD_QUALITY_ALPHANUMERIC
+                                        "COMPLEX" -> DevicePolicyManager.PASSWORD_QUALITY_COMPLEX
+                                        else -> DevicePolicyManager.PASSWORD_QUALITY_COMPLEX
+                                    }
+                                    
+                                    dpm.setPasswordQuality(adminComponent, passwordQuality)
+                                    dpm.setPasswordMinimumLength(adminComponent, minLength)
+                                    
+                                    // Complex password requirements
+                                    if (passwordQuality == DevicePolicyManager.PASSWORD_QUALITY_COMPLEX) {
+                                        dpm.setPasswordMinimumLetters(adminComponent, minLetters)
+                                        dpm.setPasswordMinimumNumeric(adminComponent, minNumeric)
+                                        dpm.setPasswordMinimumSymbols(adminComponent, minSymbols)
+                                    }
+                                    
+                                    // Set auto-lock timeout (convert minutes to milliseconds)
+                                    dpm.setMaximumTimeToLock(adminComponent, maxTimeToLockMinutes * 60 * 1000L)
+                                    
+                                    // Set maximum failed password attempts before wipe
+                                    dpm.setMaximumFailedPasswordsForWipe(adminComponent, maxFailedAttempts)
+                                    
+                                    resultData["quality"] = quality
+                                    resultData["minLength"] = minLength
+                                    resultData["minLetters"] = minLetters
+                                    resultData["minNumeric"] = minNumeric
+                                    resultData["minSymbols"] = minSymbols
+                                    resultData["maxTimeToLockMinutes"] = maxTimeToLockMinutes
+                                    resultData["maxFailedAttempts"] = maxFailedAttempts
+                                    resultData["enforcedAt"] = System.currentTimeMillis()
+                                    
+                                    // Check if current password meets requirements
+                                    val isPasswordSufficient = dpm.isActivePasswordSufficient
+                                    resultData["currentPasswordSufficient"] = isPasswordSufficient
+                                    
+                                    if (!isPasswordSufficient) {
+                                        resultData["userActionRequired"] = "User must change password to meet new requirements"
+                                    }
+                                    
+                                    Timber.i("🔐 Password policy enforced: $quality, min $minLength chars, lock after $maxTimeToLockMinutes min")
+                                } catch (e: SecurityException) {
+                                    status = "FAILED"
+                                    errorMessage = "SecurityException: ${e.message}"
+                                    Timber.e(e, "ENFORCE_PASSWORD SecurityException")
+                                } catch (e: Exception) {
+                                    status = "FAILED"
+                                    errorMessage = "Failed to enforce password policy: ${e.message}"
+                                    Timber.e(e, "ENFORCE_PASSWORD failed")
+                                }
+                            }
+                            "REMOTE_WALLPAPER" -> {
+                                // Extract wallpaper URL and support message
+                                val wallpaperUrl = cmd.parameters?.get("wallpaperUrl") as? String
+                                val supportMessage = cmd.parameters?.get("supportMessage") as? String
+                                
+                                if (wallpaperUrl.isNullOrEmpty()) {
+                                    status = "FAILED"
+                                    errorMessage = "Missing required parameter: wallpaperUrl"
+                                    Timber.w("REMOTE_WALLPAPER failed: missing wallpaperUrl")
+                                } else {
+                                    try {
+                                        // Download wallpaper image from URL
+                                        Timber.i("🖼️ Downloading wallpaper from: $wallpaperUrl")
+                                        
+                                        val client = okhttp3.OkHttpClient()
+                                        val request = okhttp3.Request.Builder()
+                                            .url(wallpaperUrl)
+                                            .build()
+                                        
+                                        val response = client.newCall(request).execute()
+                                        
+                                        if (!response.isSuccessful) {
+                                            status = "FAILED"
+                                            errorMessage = "Failed to download wallpaper: HTTP ${response.code}"
+                                            Timber.e("Wallpaper download failed: ${response.code}")
+                                        } else {
+                                            val inputStream = response.body?.byteStream()
+                                            if (inputStream != null) {
+                                                val bitmap = android.graphics.BitmapFactory.decodeStream(inputStream)
+                                                inputStream.close()
+                                                
+                                                if (bitmap != null) {
+                                                    // Set wallpaper
+                                                    val wallpaperManager = android.app.WallpaperManager.getInstance(applicationContext)
+                                                    wallpaperManager.setBitmap(bitmap)
+                                                    
+                                                    resultData["wallpaperUrl"] = wallpaperUrl
+                                                    resultData["wallpaperSet"] = true
+                                                    resultData["setAt"] = System.currentTimeMillis()
+                                                    
+                                                    Timber.i("✅ Wallpaper set successfully")
+                                                } else {
+                                                    status = "FAILED"
+                                                    errorMessage = "Failed to decode wallpaper image"
+                                                    Timber.e("Invalid wallpaper image format")
+                                                }
+                                            } else {
+                                                status = "FAILED"
+                                                errorMessage = "Empty response body"
+                                                Timber.e("Wallpaper response body is null")
+                                            }
+                                        }
+                                        
+                                        // Set support message if provided
+                                        if (!supportMessage.isNullOrEmpty()) {
+                                            dpm.setShortSupportMessage(adminComponent, supportMessage)
+                                            resultData["supportMessage"] = supportMessage
+                                            resultData["supportMessageSet"] = true
+                                            Timber.i("💬 Support message set: $supportMessage")
+                                        }
+                                        
+                                    } catch (e: SecurityException) {
+                                        status = "FAILED"
+                                        errorMessage = "SecurityException: ${e.message}"
+                                        Timber.e(e, "REMOTE_WALLPAPER SecurityException")
+                                    } catch (e: Exception) {
+                                        status = "FAILED"
+                                        errorMessage = "Failed to set wallpaper: ${e.message}"
+                                        Timber.e(e, "REMOTE_WALLPAPER failed")
+                                    }
+                                }
+                            }
                             "WIPE" -> {
                                 Timber.w("🚨 Executing factory wipe requested by control plane dual-approval")
                                 dpm.wipeData(DevicePolicyManager.WIPE_EXTERNAL_STORAGE)
+                            }
+                            "INSTALL_SOFTWARE" -> {
+                                // Software Deployment Module integration (TASK-052 + TASK-054)
+                                // Extract package metadata from payload
+                                val packageId = cmd.parameters?.get("packageId") as? String
+                                val packageName = cmd.parameters?.get("packageName") as? String
+                                val packageVersion = cmd.parameters?.get("packageVersion") as? String
+                                val deploymentId = cmd.parameters?.get("deploymentId") as? String
+                                val fileUrl = cmd.parameters?.get("fileUrl") as? String
+                                val fileHash = cmd.parameters?.get("fileHash") as? String
+                                
+                                if (fileUrl.isNullOrEmpty()) {
+                                    status = "FAILED"
+                                    errorMessage = "Missing required parameter: fileUrl"
+                                    Timber.w("INSTALL_SOFTWARE failed: missing fileUrl")
+                                } else {
+                                    try {
+                                        Timber.i("📦 Installing software package: ${packageName ?: "Unknown"} v${packageVersion ?: "Unknown"}")
+                                        Timber.i("Deployment ID: $deploymentId, Package ID: $packageId")
+                                        
+                                        // Initialize silent package installer
+                                        val installer = SilentPackageInstaller(applicationContext)
+                                        
+                                        // Check installation capability
+                                        if (!installer.canInstallPackages()) {
+                                            status = "FAILED"
+                                            errorMessage = "Missing REQUEST_INSTALL_PACKAGES permission or not in Device Owner mode"
+                                            resultData["requiresDeviceOwner"] = true
+                                            Timber.w("INSTALL_SOFTWARE failed: cannot install packages")
+                                            
+                                            // Update deployment status to FAILED
+                                            if (!deploymentId.isNullOrEmpty()) {
+                                                try {
+                                                    networkClient.apiService.updateDeploymentStatus(
+                                                        deviceKey = storage.deviceKey!!,
+                                                        deviceSecret = storage.deviceSecret!!,
+                                                        deploymentId = deploymentId,
+                                                        status = "FAILED",
+                                                        failureDetails = mapOf(
+                                                            "stage" to "PERMISSION_CHECK",
+                                                            "error" to errorMessage,
+                                                            "errorType" to "INSUFFICIENT_PERMISSIONS",
+                                                            "timestamp" to System.currentTimeMillis()
+                                                        )
+                                                    )
+                                                } catch (e: Exception) {
+                                                    Timber.w(e, "Failed to update deployment status to FAILED")
+                                                }
+                                            }
+                                        } else {
+                                            // Update deployment status to DOWNLOADING
+                                            if (!deploymentId.isNullOrEmpty()) {
+                                                try {
+                                                    networkClient.apiService.updateDeploymentStatus(
+                                                        deviceKey = storage.deviceKey!!,
+                                                        deviceSecret = storage.deviceSecret!!,
+                                                        deploymentId = deploymentId,
+                                                        status = "DOWNLOADING",
+                                                        progress = mapOf(
+                                                            "currentStep" to "Downloading APK",
+                                                            "downloadProgress" to 0
+                                                        )
+                                                    )
+                                                } catch (e: Exception) {
+                                                    Timber.w(e, "Failed to update deployment status to DOWNLOADING")
+                                                }
+                                            }
+                                            
+                                            // Download and install APK
+                                            Timber.i("📥 Downloading APK from: $fileUrl")
+                                            val installResult = installer.installFromUrl(fileUrl, packageName)
+                                            
+                                            if (installResult.success) {
+                                                // Installation successful
+                                                resultData["packageId"] = packageId ?: "unknown"
+                                                resultData["packageName"] = installResult.packageName ?: packageName ?: "unknown"
+                                                resultData["packageVersion"] = packageVersion ?: "unknown"
+                                                resultData["deploymentId"] = deploymentId ?: "unknown"
+                                                resultData["installedAt"] = System.currentTimeMillis()
+                                                resultData["fileUrl"] = fileUrl
+                                                resultData["method"] = "PackageInstaller"
+                                                
+                                                Timber.i("✅ Software installation succeeded: ${installResult.packageName}")
+                                                
+                                                // Update deployment status to COMPLETED
+                                                if (!deploymentId.isNullOrEmpty()) {
+                                                    try {
+                                                        networkClient.apiService.updateDeploymentStatus(
+                                                            deviceKey = storage.deviceKey!!,
+                                                            deviceSecret = storage.deviceSecret!!,
+                                                            deploymentId = deploymentId,
+                                                            status = "COMPLETED",
+                                                            result = mapOf(
+                                                                "success" to true,
+                                                                "packageName" to (installResult.packageName ?: packageName ?: "unknown"),
+                                                                "installedAt" to System.currentTimeMillis()
+                                                            )
+                                                        )
+                                                    } catch (e: Exception) {
+                                                        Timber.w(e, "Failed to update deployment status to COMPLETED")
+                                                    }
+                                                }
+                                            } else {
+                                                // Installation failed
+                                                status = "FAILED"
+                                                errorMessage = installResult.message
+                                                resultData["packageId"] = packageId ?: "unknown"
+                                                resultData["deploymentId"] = deploymentId ?: "unknown"
+                                                resultData["fileUrl"] = fileUrl
+                                                resultData["failureReason"] = installResult.message
+                                                
+                                                Timber.e("❌ Software installation failed: ${installResult.message}")
+                                                
+                                                // Update deployment status to FAILED
+                                                if (!deploymentId.isNullOrEmpty()) {
+                                                    try {
+                                                        networkClient.apiService.updateDeploymentStatus(
+                                                            deviceKey = storage.deviceKey!!,
+                                                            deviceSecret = storage.deviceSecret!!,
+                                                            deploymentId = deploymentId,
+                                                            status = "FAILED",
+                                                            result = mapOf(
+                                                                "success" to false,
+                                                                "error" to installResult.message
+                                                            ),
+                                                            failureDetails = mapOf(
+                                                                "stage" to "INSTALLATION",
+                                                                "error" to installResult.message,
+                                                                "errorType" to "INSTALL_FAILED",
+                                                                "timestamp" to System.currentTimeMillis()
+                                                            )
+                                                        )
+                                                    } catch (e: Exception) {
+                                                        Timber.w(e, "Failed to update deployment status to FAILED")
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } catch (e: Exception) {
+                                        status = "FAILED"
+                                        errorMessage = "Software installation exception: ${e.message}"
+                                        Timber.e(e, "INSTALL_SOFTWARE exception")
+                                        
+                                        // Update deployment status to FAILED on exception
+                                        if (!deploymentId.isNullOrEmpty()) {
+                                            try {
+                                                networkClient.apiService.updateDeploymentStatus(
+                                                    deviceKey = storage.deviceKey!!,
+                                                    deviceSecret = storage.deviceSecret!!,
+                                                    deploymentId = deploymentId,
+                                                    status = "FAILED",
+                                                    failureDetails = mapOf(
+                                                        "stage" to "EXECUTION",
+                                                        "error" to (e.message ?: "Unknown exception"),
+                                                        "errorType" to "EXCEPTION",
+                                                        "timestamp" to System.currentTimeMillis()
+                                                    )
+                                                )
+                                            } catch (updateEx: Exception) {
+                                                Timber.w(updateEx, "Failed to update deployment status on exception")
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            "UNINSTALL_SOFTWARE" -> {
+                                // Software Deployment Module integration (TASK-052 + TASK-054)
+                                // Extract package metadata from payload
+                                val packageId = cmd.parameters?.get("packageId") as? String
+                                val packageName = cmd.parameters?.get("packageName") as? String
+                                val packageVersion = cmd.parameters?.get("packageVersion") as? String
+                                
+                                if (packageName.isNullOrEmpty()) {
+                                    status = "FAILED"
+                                    errorMessage = "Missing required parameter: packageName"
+                                    Timber.w("UNINSTALL_SOFTWARE failed: missing packageName")
+                                } else {
+                                    try {
+                                        Timber.i("🗑️ Uninstalling software package: $packageName v${packageVersion ?: "Unknown"}")
+                                        Timber.i("Package ID: $packageId")
+                                        
+                                        // Initialize silent package installer
+                                        val installer = SilentPackageInstaller(applicationContext)
+                                        
+                                        // Check if package is installed
+                                        if (!installer.isPackageInstalled(packageName)) {
+                                            // Package not found - treat as success (idempotent operation)
+                                            resultData["packageId"] = packageId ?: "unknown"
+                                            resultData["packageName"] = packageName
+                                            resultData["packageVersion"] = packageVersion ?: "unknown"
+                                            resultData["uninstalledAt"] = System.currentTimeMillis()
+                                            resultData["note"] = "Package not found - may have been already uninstalled"
+                                            
+                                            Timber.i("ℹ️ Package not installed: $packageName (treating as success)")
+                                        } else {
+                                            // Uninstall package
+                                            val uninstallResult = installer.uninstallPackage(packageName)
+                                            
+                                            if (uninstallResult.success) {
+                                                // Uninstallation successful
+                                                resultData["packageId"] = packageId ?: "unknown"
+                                                resultData["packageName"] = packageName
+                                                resultData["packageVersion"] = packageVersion ?: "unknown"
+                                                resultData["uninstalledAt"] = System.currentTimeMillis()
+                                                resultData["method"] = "PackageInstaller"
+                                                
+                                                Timber.i("✅ Software uninstallation succeeded: $packageName")
+                                            } else {
+                                                // Uninstallation failed
+                                                status = "FAILED"
+                                                errorMessage = uninstallResult.message
+                                                resultData["packageId"] = packageId ?: "unknown"
+                                                resultData["packageName"] = packageName
+                                                resultData["failureReason"] = uninstallResult.message
+                                                
+                                                Timber.e("❌ Software uninstallation failed: ${uninstallResult.message}")
+                                            }
+                                        }
+                                    } catch (e: Exception) {
+                                        status = "FAILED"
+                                        errorMessage = "Software uninstallation exception: ${e.message}"
+                                        Timber.e(e, "UNINSTALL_SOFTWARE exception")
+                                    }
+                                }
                             }
                             else -> {
                                 status = "FAILED"

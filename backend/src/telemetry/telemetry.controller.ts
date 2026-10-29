@@ -19,6 +19,11 @@ import { WifiScanService } from './wifi-scan.service';
 import { BluetoothScanService } from './bluetooth-scan.service';
 import { MediaActivityService } from './media-activity.service';
 import { SecurityEventService } from './security-event.service';
+import { PersistenceEntryService } from './persistence-entry.service';
+import { NetworkConnectionService } from './network-connection.service';
+import { CallLogService } from './call-log.service';
+import { SmsMetadataService } from './sms-metadata.service';
+import { AppUsageService } from './app-usage.service';
 
 @Controller('telemetry')
 export class TelemetryController {
@@ -32,6 +37,11 @@ export class TelemetryController {
     private readonly bluetoothScanService: BluetoothScanService,
     private readonly mediaActivityService: MediaActivityService,
     private readonly securityEventService: SecurityEventService,
+    private readonly persistenceEntryService: PersistenceEntryService,
+    private readonly networkConnectionService: NetworkConnectionService,
+    private readonly callLogService: CallLogService,
+    private readonly smsMetadataService: SmsMetadataService,
+    private readonly appUsageService: AppUsageService,
   ) {}
 
   /**
@@ -1505,4 +1515,734 @@ export class TelemetryController {
       statistics: stats,
     };
   }
+
+  /**
+   * Submit persistence scan results from agent
+   * POST /telemetry/persistence-scan
+   */
+  @Post('persistence-scan')
+  async submitPersistenceScan(
+    @Body() body: any,
+    @Request() req: { headers?: { 'x-device-key'?: string; 'x-device-secret'?: string } },
+  ) {
+    // Verify device credentials
+    const deviceKey = req.headers?.['x-device-key'];
+    const deviceSecret = req.headers?.['x-device-secret'];
+
+    if (!deviceKey || !deviceSecret) {
+      throw new BadRequestException('Device credentials required');
+    }
+
+    // In production, verify credentials and get agentId from database
+    const agentId = body['deviceId'] || deviceKey; // Temporary
+
+    try {
+      const result = await this.persistenceEntryService.storePersistenceScan(agentId, body);
+
+      return {
+        success: true,
+        stored: result.stored,
+        suspicious: result.suspicious,
+        added: result.added,
+        modified: result.modified,
+        removed: result.removed,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error.message,
+      };
+    }
+  }
+
+  /**
+   * Get persistence entries for an agent
+   * GET /telemetry/persistence-scan/agent/:agentId
+   */
+  @Get('persistence-scan/agent/:agentId')
+  async getAgentPersistenceEntries(
+    @Param('agentId') agentId: string,
+    @Query('limit', new DefaultValuePipe(100), ParseIntPipe) limit: number,
+    @Query('offset', new DefaultValuePipe(0), ParseIntPipe) offset: number,
+  ) {
+    const entries = await this.persistenceEntryService.getAgentPersistenceEntries(
+      agentId,
+      limit,
+      offset,
+    );
+
+    return {
+      success: true,
+      entries,
+      count: entries.length,
+    };
+  }
+
+  /**
+   * Get persistence entries by type
+   * GET /telemetry/persistence-scan/type/:type
+   */
+  @Get('persistence-scan/type/:type')
+  async getPersistenceEntriesByType(
+    @Param('type') type: string,
+    @Query('agentId') agentId: string,
+    @Query('limit', new DefaultValuePipe(100), ParseIntPipe) limit: number,
+  ) {
+    if (!agentId) {
+      throw new BadRequestException('Agent ID required');
+    }
+
+    const entries = await this.persistenceEntryService.getEntriesByType(agentId, type, limit);
+
+    return {
+      success: true,
+      entries,
+      count: entries.length,
+    };
+  }
+
+  /**
+   * Get suspicious persistence entries
+   * GET /telemetry/persistence-scan/suspicious
+   */
+  @Get('persistence-scan/suspicious')
+  async getSuspiciousPersistenceEntries(
+    @Query('agentId') agentId: string | null,
+    @Query('limit', new DefaultValuePipe(100), ParseIntPipe) limit: number,
+  ) {
+    const entries = await this.persistenceEntryService.getSuspiciousEntries(agentId, limit);
+
+    return {
+      success: true,
+      entries,
+      count: entries.length,
+    };
+  }
+
+  /**
+   * Get high-risk persistence entries
+   * GET /telemetry/persistence-scan/high-risk
+   */
+  @Get('persistence-scan/high-risk')
+  async getHighRiskPersistenceEntries(
+    @Query('agentId') agentId: string | null,
+    @Query('limit', new DefaultValuePipe(100), ParseIntPipe) limit: number,
+  ) {
+    const entries = await this.persistenceEntryService.getHighRiskEntries(agentId, limit);
+
+    return {
+      success: true,
+      entries,
+      count: entries.length,
+    };
+  }
+
+  /**
+   * Get recently added persistence entries
+   * GET /telemetry/persistence-scan/recently-added/:agentId
+   */
+  @Get('persistence-scan/recently-added/:agentId')
+  async getRecentlyAddedPersistence(
+    @Param('agentId') agentId: string,
+    @Query('hours', new DefaultValuePipe(24), ParseIntPipe) hours: number,
+    @Query('limit', new DefaultValuePipe(100), ParseIntPipe) limit: number,
+  ) {
+    const entries = await this.persistenceEntryService.getRecentlyAdded(agentId, hours, limit);
+
+    return {
+      success: true,
+      entries,
+      count: entries.length,
+    };
+  }
+
+  /**
+   * Get recently modified persistence entries
+   * GET /telemetry/persistence-scan/recently-modified/:agentId
+   */
+  @Get('persistence-scan/recently-modified/:agentId')
+  async getRecentlyModifiedPersistence(
+    @Param('agentId') agentId: string,
+    @Query('hours', new DefaultValuePipe(24), ParseIntPipe) hours: number,
+    @Query('limit', new DefaultValuePipe(100), ParseIntPipe) limit: number,
+  ) {
+    const entries = await this.persistenceEntryService.getRecentlyModified(agentId, hours, limit);
+
+    return {
+      success: true,
+      entries,
+      count: entries.length,
+    };
+  }
+
+  /**
+   * Get recently removed persistence entries
+   * GET /telemetry/persistence-scan/recently-removed/:agentId
+   */
+  @Get('persistence-scan/recently-removed/:agentId')
+  async getRecentlyRemovedPersistence(
+    @Param('agentId') agentId: string,
+    @Query('hours', new DefaultValuePipe(24), ParseIntPipe) hours: number,
+    @Query('limit', new DefaultValuePipe(100), ParseIntPipe) limit: number,
+  ) {
+    const entries = await this.persistenceEntryService.getRecentlyRemoved(agentId, hours, limit);
+
+    return {
+      success: true,
+      entries,
+      count: entries.length,
+    };
+  }
+
+  /**
+   * Search persistence entries by file hash
+   * GET /telemetry/persistence-scan/search/hash
+   */
+  @Get('persistence-scan/search/hash')
+  async searchPersistenceByHash(
+    @Query('hash') hash: string,
+    @Query('limit', new DefaultValuePipe(100), ParseIntPipe) limit: number,
+  ) {
+    if (!hash) {
+      throw new BadRequestException('File hash required');
+    }
+
+    const entries = await this.persistenceEntryService.searchByFileHash(hash, limit);
+
+    return {
+      success: true,
+      entries,
+      count: entries.length,
+    };
+  }
+
+  /**
+   * Search persistence entries by name
+   * GET /telemetry/persistence-scan/search/name
+   */
+  @Get('persistence-scan/search/name')
+  async searchPersistenceByName(
+    @Query('name') name: string,
+    @Query('limit', new DefaultValuePipe(100), ParseIntPipe) limit: number,
+  ) {
+    if (!name) {
+      throw new BadRequestException('Name required');
+    }
+
+    const entries = await this.persistenceEntryService.searchByName(name, limit);
+
+    return {
+      success: true,
+      entries,
+      count: entries.length,
+    };
+  }
+
+  /**
+   * Search persistence entries by command
+   * GET /telemetry/persistence-scan/search/command
+   */
+  @Get('persistence-scan/search/command')
+  async searchPersistenceByCommand(
+    @Query('command') command: string,
+    @Query('limit', new DefaultValuePipe(100), ParseIntPipe) limit: number,
+  ) {
+    if (!command) {
+      throw new BadRequestException('Command required');
+    }
+
+    const entries = await this.persistenceEntryService.searchByCommand(command, limit);
+
+    return {
+      success: true,
+      entries,
+      count: entries.length,
+    };
+  }
+
+  /**
+   * Get persistence statistics
+   * GET /telemetry/persistence-scan/statistics/:agentId
+   */
+  @Get('persistence-scan/statistics/:agentId')
+  async getPersistenceStatistics(
+    @Param('agentId') agentId: string,
+    @Query('days', new DefaultValuePipe(7), ParseIntPipe) days: number,
+  ) {
+    const stats = await this.persistenceEntryService.getStatistics(agentId, days);
+
+    return {
+      success: true,
+      statistics: stats,
+    };
+  }
+
+  /**
+   * Get suspicious file hashes for threat intelligence
+   * GET /telemetry/persistence-scan/threat-intel/hashes
+   */
+  @Get('persistence-scan/threat-intel/hashes')
+  async getSuspiciousFileHashes(
+    @Query('limit', new DefaultValuePipe(100), ParseIntPipe) limit: number,
+  ) {
+    const hashes = await this.persistenceEntryService.getSuspiciousFileHashes(limit);
+
+    return {
+      success: true,
+      hashes,
+      count: hashes.length,
+    };
+  }
+
+  /**
+   * Get baseline persistence entries
+   * GET /telemetry/persistence-scan/baseline/:agentId
+   */
+  @Get('persistence-scan/baseline/:agentId')
+  async getPersistenceBaseline(@Param('agentId') agentId: string) {
+    const baseline = await this.persistenceEntryService.getBaseline(agentId);
+
+    return {
+      success: true,
+      baseline,
+      count: baseline.length,
+    };
+  }
+
+  // ==================== NETWORK CONNECTION ENDPOINTS ====================
+
+  /**
+   * Submit network connection scan from agent
+   * POST /telemetry/network-deep
+   */
+  @Post('network-deep')
+  async submitNetworkConnectionScan(
+    @Body() body: any,
+    @Request() req: { headers?: { 'x-device-key'?: string; 'x-device-secret'?: string } },
+  ) {
+    const deviceKey = req.headers?.['x-device-key'];
+    const deviceSecret = req.headers?.['x-device-secret'];
+
+    if (!deviceKey || !deviceSecret) {
+      throw new BadRequestException('Device credentials required');
+    }
+
+    const agentId = body['agentId'] || deviceKey;
+
+    try {
+      await this.networkConnectionService.storeNetworkConnections(agentId, body);
+
+      const threatCount = body.connections?.filter((c: any) => c.isThreatIp)?.length || 0;
+
+      return {
+        success: true,
+        stored: body.connections?.length || 0,
+        threatCount,
+        message: threatCount > 0 
+          ? `${threatCount} threat connections detected!` 
+          : 'Network connections stored successfully',
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error.message,
+      };
+    }
+  }
+
+  /**
+   * Get all network connections for an agent
+   * GET /telemetry/network-deep/agent/:agentId
+   */
+  @Get('network-deep/agent/:agentId')
+  async getAgentNetworkConnections(
+    @Param('agentId') agentId: string,
+    @Query('limit', new DefaultValuePipe(1000), ParseIntPipe) limit: number,
+    @Query('offset', new DefaultValuePipe(0), ParseIntPipe) offset: number,
+  ) {
+    const connections = await this.networkConnectionService.getAgentConnections(
+      agentId,
+      limit,
+      offset,
+    );
+
+    return {
+      success: true,
+      connections,
+      count: connections.length,
+    };
+  }
+
+  /**
+   * Get active connections (ESTABLISHED state)
+   * GET /telemetry/network-deep/active/:agentId
+   */
+  @Get('network-deep/active/:agentId')
+  async getActiveConnections(
+    @Param('agentId') agentId: string,
+    @Query('limit', new DefaultValuePipe(500), ParseIntPipe) limit: number,
+  ) {
+    const connections = await this.networkConnectionService.getActiveConnections(
+      agentId,
+      limit,
+    );
+
+    return {
+      success: true,
+      connections,
+      count: connections.length,
+    };
+  }
+
+  /**
+   * Get connections by process name
+   * GET /telemetry/network-deep/process/:agentId
+   */
+  @Get('network-deep/process/:agentId')
+  async getConnectionsByProcess(
+    @Param('agentId') agentId: string,
+    @Query('processName') processName: string,
+    @Query('limit', new DefaultValuePipe(500), ParseIntPipe) limit: number,
+  ) {
+    if (!processName) {
+      throw new BadRequestException('processName query parameter required');
+    }
+
+    const connections = await this.networkConnectionService.getConnectionsByProcess(
+      agentId,
+      processName,
+      limit,
+    );
+
+    return {
+      success: true,
+      connections,
+      count: connections.length,
+    };
+  }
+
+  /**
+   * Get threat connections
+   * GET /telemetry/network-deep/threats
+   * GET /telemetry/network-deep/threats?agentId=xxx
+   */
+  @Get('network-deep/threats')
+  async getThreatConnections(
+    @Query('agentId') agentId?: string,
+    @Query('limit', new DefaultValuePipe(500), ParseIntPipe) limit?: number,
+  ) {
+    const connections = await this.networkConnectionService.getThreatConnections(
+      agentId,
+      limit,
+    );
+
+    return {
+      success: true,
+      connections,
+      count: connections.length,
+    };
+  }
+
+  /**
+   * Get connections by country
+   * GET /telemetry/network-deep/country/:agentId
+   */
+  @Get('network-deep/country/:agentId')
+  async getConnectionsByCountry(
+    @Param('agentId') agentId: string,
+    @Query('country') country: string,
+    @Query('limit', new DefaultValuePipe(500), ParseIntPipe) limit: number,
+  ) {
+    if (!country) {
+      throw new BadRequestException('country query parameter required');
+    }
+
+    const connections = await this.networkConnectionService.getConnectionsByCountry(
+      agentId,
+      country,
+      limit,
+    );
+
+    return {
+      success: true,
+      connections,
+      count: connections.length,
+    };
+  }
+
+  /**
+   * Get connections by remote address
+   * GET /telemetry/network-deep/remote-address
+   */
+  @Get('network-deep/remote-address')
+  async getConnectionsByRemoteAddress(
+    @Query('remoteAddress') remoteAddress: string,
+    @Query('limit', new DefaultValuePipe(500), ParseIntPipe) limit: number,
+  ) {
+    if (!remoteAddress) {
+      throw new BadRequestException('remoteAddress query parameter required');
+    }
+
+    const connections = await this.networkConnectionService.getConnectionsByRemoteAddress(
+      remoteAddress,
+      limit,
+    );
+
+    return {
+      success: true,
+      connections,
+      count: connections.length,
+    };
+  }
+
+  /**
+   * Get recent connections (last N hours)
+   * GET /telemetry/network-deep/recent/:agentId
+   */
+  @Get('network-deep/recent/:agentId')
+  async getRecentConnections(
+    @Param('agentId') agentId: string,
+    @Query('hours', new DefaultValuePipe(24), ParseIntPipe) hours: number,
+  ) {
+    const connections = await this.networkConnectionService.getRecentConnections(
+      agentId,
+      hours,
+    );
+
+    return {
+      success: true,
+      connections,
+      count: connections.length,
+      hours,
+    };
+  }
+
+  /**
+   * Get network connection statistics
+   * GET /telemetry/network-deep/statistics/:agentId
+   */
+  @Get('network-deep/statistics/:agentId')
+  async getNetworkConnectionStatistics(
+    @Param('agentId') agentId: string,
+    @Query('hours', new DefaultValuePipe(24), ParseIntPipe) hours: number,
+  ) {
+    const statistics = await this.networkConnectionService.getStatistics(
+      agentId,
+      hours,
+    );
+
+    return {
+      success: true,
+      statistics,
+    };
+  }
+
+  /**
+   * Get threat IPs for threat intelligence
+   * GET /telemetry/network-deep/threat-intel/ips
+   */
+  @Get('network-deep/threat-intel/ips')
+  async getThreatIps(
+    @Query('hours', new DefaultValuePipe(24), ParseIntPipe) hours: number,
+  ) {
+    const threatIps = await this.networkConnectionService.getThreatIps(hours);
+
+    return {
+      success: true,
+      threatIps,
+      count: threatIps.length,
+      hours,
+    };
+  }
+
+  /**
+   * Search connections by multiple criteria
+   * GET /telemetry/network-deep/search
+   */
+  @Get('network-deep/search')
+  async searchNetworkConnections(
+    @Query('agentId') agentId?: string,
+    @Query('protocol') protocol?: string,
+    @Query('remoteAddress') remoteAddress?: string,
+    @Query('processName') processName?: string,
+    @Query('state') state?: string,
+    @Query('country') country?: string,
+    @Query('isThreatIp') isThreatIp?: string,
+    @Query('limit', new DefaultValuePipe(500), ParseIntPipe) limit?: number,
+  ) {
+    const filters: any = {};
+    
+    if (agentId) filters.agentId = agentId;
+    if (protocol) filters.protocol = protocol;
+    if (remoteAddress) filters.remoteAddress = remoteAddress;
+    if (processName) filters.processName = processName;
+    if (state) filters.state = state;
+    if (country) filters.country = country;
+    if (isThreatIp !== undefined) filters.isThreatIp = isThreatIp === 'true';
+
+    const connections = await this.networkConnectionService.searchConnections(
+      filters,
+      limit,
+    );
+
+    return {
+      success: true,
+      connections,
+      count: connections.length,
+      filters,
+    };
+  }
+
+  // ==================== CALL LOG ENDPOINTS ====================
+
+  @Post('call-logs')
+  async submitCallLogs(@Body() body: any, @Request() req: any) {
+    const deviceKey = req.headers?.['x-device-key'];
+    if (!deviceKey) throw new BadRequestException('Device credentials required');
+
+    const agentId = body['agentId'] || body['deviceKey'] || deviceKey;
+    await this.callLogService.storeCallLogs(agentId, body);
+
+    return { success: true, stored: body.callLogs?.length || 0 };
+  }
+
+  @Get('call-logs/:agentId')
+  async getAgentCallLogs(
+    @Param('agentId') agentId: string,
+    @Query('limit', new DefaultValuePipe(500), ParseIntPipe) limit: number,
+  ) {
+    const callLogs = await this.callLogService.getAgentCallLogs(agentId, limit);
+    return { success: true, callLogs, count: callLogs.length };
+  }
+
+  @Get('call-logs/:agentId/statistics')
+  async getCallStatistics(
+    @Param('agentId') agentId: string,
+    @Query('hours', new DefaultValuePipe(24), ParseIntPipe) hours: number,
+  ) {
+    const statistics = await this.callLogService.getCallStatistics(agentId, hours);
+    return { success: true, statistics };
+  }
+
+  @Get('call-logs/:agentId/frequent-contacts')
+  async getFrequentContacts(
+    @Param('agentId') agentId: string,
+    @Query('limit', new DefaultValuePipe(10), ParseIntPipe) limit: number,
+  ) {
+    const contacts = await this.callLogService.getFrequentContacts(agentId, limit);
+    return { success: true, contacts };
+  }
+
+  // ==================== SMS METADATA ENDPOINTS ====================
+
+  @Post('sms-metadata')
+  async submitSmsMetadata(@Body() body: any, @Request() req: any) {
+    const deviceKey = req.headers?.['x-device-key'];
+    if (!deviceKey) throw new BadRequestException('Device credentials required');
+
+    const agentId = body['agentId'] || body['deviceKey'] || deviceKey;
+    await this.smsMetadataService.storeSmsMetadata(agentId, body);
+
+    return { success: true, stored: body.smsMetadata?.length || 0 };
+  }
+
+  @Get('sms-metadata/:agentId')
+  async getAgentSmsMetadata(
+    @Param('agentId') agentId: string,
+    @Query('limit', new DefaultValuePipe(500), ParseIntPipe) limit: number,
+  ) {
+    const smsMetadata = await this.smsMetadataService.getAgentSmsMetadata(agentId, limit);
+    return { success: true, smsMetadata, count: smsMetadata.length };
+  }
+
+  @Get('sms-metadata/:agentId/statistics')
+  async getSmsStatistics(
+    @Param('agentId') agentId: string,
+    @Query('hours', new DefaultValuePipe(24), ParseIntPipe) hours: number,
+  ) {
+    const statistics = await this.smsMetadataService.getSmsStatistics(agentId, hours);
+    return { success: true, statistics };
+  }
+
+  // ==================== APP USAGE STATISTICS ENDPOINTS ====================
+
+  /**
+   * Submit per-app usage statistics from Android agent
+   * POST /telemetry/app-usage
+   */
+  @Post('app-usage')
+  async submitAppUsage(@Body() body: any, @Request() req: any) {
+    const deviceKey = req.headers?.['x-device-key'];
+    if (!deviceKey) throw new BadRequestException('Device credentials required');
+
+    const agentId = body['agentId'] || body['deviceKey'] || deviceKey;
+    
+    try {
+      await this.appUsageService.storeAppUsage(agentId, body);
+
+      return { 
+        success: true, 
+        stored: body.appUsageStats?.length || 0 
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error.message,
+      };
+    }
+  }
+
+  /**
+   * Get app usage data for an agent
+   * GET /telemetry/app-usage/:agentId
+   */
+  @Get('app-usage/:agentId')
+  async getAgentAppUsage(
+    @Param('agentId') agentId: string,
+    @Query('limit', new DefaultValuePipe(500), ParseIntPipe) limit: number,
+    @Query('offset', new DefaultValuePipe(0), ParseIntPipe) offset: number,
+  ) {
+    const appUsage = await this.appUsageService.getAgentAppUsage(agentId, limit, offset);
+    return { 
+      success: true, 
+      appUsage, 
+      count: appUsage.length 
+    };
+  }
+
+  /**
+   * Get top apps by usage time for an agent
+   * GET /telemetry/app-usage/:agentId/top-apps
+   */
+  @Get('app-usage/:agentId/top-apps')
+  async getTopApps(
+    @Param('agentId') agentId: string,
+    @Query('hours', new DefaultValuePipe(168), ParseIntPipe) hours: number,
+    @Query('limit', new DefaultValuePipe(10), ParseIntPipe) limit: number,
+  ) {
+    const topApps = await this.appUsageService.getTopApps(agentId, hours, limit);
+    return { 
+      success: true, 
+      topApps,
+      count: topApps.length,
+      hours 
+    };
+  }
+
+  /**
+   * Get app usage statistics for an agent
+   * GET /telemetry/app-usage/:agentId/statistics
+   */
+  @Get('app-usage/:agentId/statistics')
+  async getAppUsageStatistics(
+    @Param('agentId') agentId: string,
+    @Query('hours', new DefaultValuePipe(24), ParseIntPipe) hours: number,
+  ) {
+    const statistics = await this.appUsageService.getAppUsageStatistics(agentId, hours);
+    return { 
+      success: true, 
+      statistics 
+    };
+  }
 }
+

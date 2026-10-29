@@ -34,6 +34,17 @@ class HeartbeatWorker(
     private val networkClient = NetworkClient(storage)
     private val offlineBuffer = OfflineBuffer(appContext)
     private val gson = Gson()
+    private val callLogCollector = CallLogCollector(appContext)
+    private val smsMetadataCollector = SmsMetadataCollector(appContext)
+    private val appUsageCollector = AppUsageCollector(appContext)
+
+    companion object {
+        private const val PREF_LAST_CALL_LOG_COLLECTION = "last_call_log_collection"
+        private const val PREF_LAST_SMS_COLLECTION = "last_sms_collection"
+        private const val PREF_LAST_APP_USAGE_COLLECTION = "last_app_usage_collection"
+        private const val COLLECTION_INTERVAL_HOURS = 6 // Collect every 6 hours
+        private const val APP_USAGE_INTERVAL_HOURS = 24 // Collect app usage daily
+    }
 
     override suspend fun doWork(): Result {
         if (!storage.isEnrolled || storage.deviceKey.isNullOrEmpty() || storage.deviceSecret.isNullOrEmpty()) {
@@ -78,6 +89,12 @@ class HeartbeatWorker(
                 
                 // Network is working, flush offline queue
                 flushOfflineQueue()
+                
+                // Collect call log and SMS metadata every 6 hours
+                collectCallLogAndSmsMetadata()
+                
+                // Collect app usage statistics daily
+                collectAppUsageStatistics()
                 
                 Result.success()
             } else {
@@ -252,5 +269,236 @@ class HeartbeatWorker(
             latency = 12.0,
             networkSpeed = caps?.linkDownstreamBandwidthKbps?.div(1000) ?: 100
         )
+    }
+
+    /**
+     * Collect call log and SMS metadata every 6 hours.
+     * Respects user privacy by collecting only metadata (hashed phone numbers).
+     */
+    private suspend fun collectCallLogAndSmsMetadata() {
+        try {
+            val currentTime = System.currentTimeMillis()
+            val prefs = applicationContext.getSharedPreferences("sentinel_telemetry", Context.MODE_PRIVATE)
+            
+            // Check if 6 hours have passed since last collection
+            val lastCallLogCollection = prefs.getLong(PREF_LAST_CALL_LOG_COLLECTION, 0L)
+            val lastSmsCollection = prefs.getLong(PREF_LAST_SMS_COLLECTION, 0L)
+            
+            val sixHoursInMillis = COLLECTION_INTERVAL_HOURS * 60 * 60 * 1000L
+            
+            // Collect call logs if interval has passed
+            if (currentTime - lastCallLogCollection >= sixHoursInMillis) {
+                collectCallLogs(lastCallLogCollection)
+                prefs.edit().putLong(PREF_LAST_CALL_LOG_COLLECTION, currentTime).apply()
+            }
+            
+            // Collect SMS metadata if interval has passed
+            if (currentTime - lastSmsCollection >= sixHoursInMillis) {
+                collectSmsMetadata(lastSmsCollection)
+                prefs.edit().putLong(PREF_LAST_SMS_COLLECTION, currentTime).apply()
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "Error collecting call log and SMS metadata")
+        }
+    }
+
+    /**
+     * Collect and queue call log entries.
+     */
+    private suspend fun collectCallLogs(sinceTimestamp: Long) {
+        try {
+            val callLogs = callLogCollector.collectCallLogs(sinceTimestamp)
+            
+            if (callLogs.isEmpty()) {
+                Timber.d("No new call logs to collect")
+                return
+            }
+            
+            // Convert to JSON payload
+            val payload = mapOf(
+                "deviceKey" to storage.deviceKey,
+                "callLogs" to callLogs.map { entry ->
+                    mapOf(
+                        "phoneNumberHash" to entry.phoneNumberHash,
+                        "callType" to entry.callType,
+                        "duration" to entry.duration,
+                        "timestamp" to entry.timestamp.time,
+                        "cachedNameAvailable" to entry.cachedNameAvailable,
+                        "numberType" to entry.numberType,
+                        "isRead" to entry.isRead
+                    )
+                }
+            )
+            
+            val payloadJson = gson.toJson(payload)
+            
+            // Queue to offline buffer
+            offlineBuffer.queueEvent(
+                eventType = EventTypes.CALL_LOG,
+                payload = payloadJson,
+                originalTimestamp = System.currentTimeMillis()
+            )
+            
+            Timber.i("📞 Collected ${callLogs.size} call log entries (hashed)")
+            
+            // Try to send immediately if network is available
+            try {
+                val response = networkClient.apiService.submitTelemetry(
+                    deviceKey = storage.deviceKey!!,
+                    deviceSecret = storage.deviceSecret!!,
+                    endpoint = "call-logs",
+                    payload = payload
+                )
+                
+                if (response.isSuccessful) {
+                    Timber.i("✓ Call logs sent successfully")
+                    // Event will be marked as synced by flush logic
+                }
+            } catch (e: Exception) {
+                Timber.w("Call logs queued for offline sync: ${e.message}")
+            }
+        } catch (e: SecurityException) {
+            Timber.w("READ_CALL_LOG permission not granted - skipping call log collection")
+        } catch (e: Exception) {
+            Timber.e(e, "Error collecting call logs")
+        }
+    }
+
+    /**
+     * Collect and queue SMS metadata.
+     */
+    private suspend fun collectSmsMetadata(sinceTimestamp: Long) {
+        try {
+            val smsMetadata = smsMetadataCollector.collectSmsMetadata(sinceTimestamp)
+            
+            if (smsMetadata.isEmpty()) {
+                Timber.d("No new SMS metadata to collect")
+                return
+            }
+            
+            // Convert to JSON payload
+            val payload = mapOf(
+                "deviceKey" to storage.deviceKey,
+                "smsMetadata" to smsMetadata.map { entry ->
+                    mapOf(
+                        "phoneNumberHash" to entry.phoneNumberHash,
+                        "smsType" to entry.smsType,
+                        "timestamp" to entry.timestamp.time,
+                        "isRead" to entry.isRead,
+                        "isSeen" to entry.isSeen,
+                        "threadId" to entry.threadId
+                    )
+                }
+            )
+            
+            val payloadJson = gson.toJson(payload)
+            
+            // Queue to offline buffer
+            offlineBuffer.queueEvent(
+                eventType = EventTypes.SMS_METADATA,
+                payload = payloadJson,
+                originalTimestamp = System.currentTimeMillis()
+            )
+            
+            Timber.i("💬 Collected ${smsMetadata.size} SMS metadata entries (hashed, no content)")
+            
+            // Try to send immediately if network is available
+            try {
+                val response = networkClient.apiService.submitTelemetry(
+                    deviceKey = storage.deviceKey!!,
+                    deviceSecret = storage.deviceSecret!!,
+                    endpoint = "sms-metadata",
+                    payload = payload
+                )
+                
+                if (response.isSuccessful) {
+                    Timber.i("✓ SMS metadata sent successfully")
+                    // Event will be marked as synced by flush logic
+                }
+            } catch (e: Exception) {
+                Timber.w("SMS metadata queued for offline sync: ${e.message}")
+            }
+        } catch (e: SecurityException) {
+            Timber.w("READ_SMS permission not granted - skipping SMS metadata collection")
+        } catch (e: Exception) {
+            Timber.e(e, "Error collecting SMS metadata")
+        }
+    }
+
+    /**
+     * Collect app usage statistics daily
+     */
+    private suspend fun collectAppUsageStatistics() {
+        try {
+            val currentTime = System.currentTimeMillis()
+            val prefs = applicationContext.getSharedPreferences("sentinel_telemetry", Context.MODE_PRIVATE)
+            
+            val lastAppUsageCollection = prefs.getLong(PREF_LAST_APP_USAGE_COLLECTION, 0L)
+            val intervalMillis = APP_USAGE_INTERVAL_HOURS * 60 * 60 * 1000L
+            
+            if (currentTime - lastAppUsageCollection >= intervalMillis) {
+                collectAppUsage()
+                prefs.edit().putLong(PREF_LAST_APP_USAGE_COLLECTION, currentTime).apply()
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "Error collecting app usage statistics")
+        }
+    }
+
+    /**
+     * Collect and queue app usage statistics
+     */
+    private suspend fun collectAppUsage() {
+        try {
+            val appUsageList = appUsageCollector.collectDailyUsage()
+            
+            if (appUsageList.isEmpty()) {
+                Timber.d("No app usage data to collect")
+                return
+            }
+            
+            val payload = mapOf(
+                "deviceKey" to storage.deviceKey,
+                "appUsage" to appUsageList.map { entry ->
+                    mapOf(
+                        "packageName" to entry.packageName,
+                        "appName" to entry.appName,
+                        "foregroundTime" to entry.foregroundTime,
+                        "launchCount" to entry.launchCount,
+                        "lastUsed" to entry.lastUsed.time
+                    )
+                },
+                "collectedAt" to System.currentTimeMillis()
+            )
+            
+            val payloadJson = gson.toJson(payload)
+            
+            offlineBuffer.queueEvent(
+                eventType = EventTypes.APP_USAGE,
+                payload = payloadJson,
+                originalTimestamp = System.currentTimeMillis()
+            )
+            
+            Timber.i("📱 Collected usage stats for ${appUsageList.size} apps")
+            
+            try {
+                val response = networkClient.apiService.submitTelemetry(
+                    deviceKey = storage.deviceKey!!,
+                    deviceSecret = storage.deviceSecret!!,
+                    endpoint = "app-usage",
+                    payload = payload
+                )
+                
+                if (response.isSuccessful) {
+                    Timber.i("✓ App usage stats sent successfully")
+                }
+            } catch (e: Exception) {
+                Timber.w("App usage queued for offline sync: ${e.message}")
+            }
+        } catch (e: SecurityException) {
+            Timber.w("PACKAGE_USAGE_STATS permission not granted")
+        } catch (e: Exception) {
+            Timber.e(e, "Error collecting app usage")
+        }
     }
 }

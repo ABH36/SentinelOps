@@ -20,6 +20,7 @@ import { EventsModule } from './events/events.module';
 import { EvidenceModule } from './evidence/evidence.module';
 import { GatewayModule } from './gateway/gateway.module';
 import { TelemetryModule } from './telemetry/telemetry.module';
+import { SoftwareModule } from './software/software.module';
 
 import { databaseConfig } from './config/database.config';
 import { redisConfig } from './config/redis.config';
@@ -53,6 +54,7 @@ import { redisConfig } from './config/redis.config';
     EvidenceModule,
     GatewayModule,
     TelemetryModule,
+    SoftwareModule,
   ],
 })
 export class AppModule {}
